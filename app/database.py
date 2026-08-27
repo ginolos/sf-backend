@@ -67,12 +67,62 @@ def _upgrade_schema(target_engine: Engine) -> None:
         raise
 
 
+def _migrate_legacy_addresses(target_engine: Engine) -> None:
+    """Move the former single-address columns into the one-to-many table once."""
+    inspector = inspect(target_engine)
+    tables = set(inspector.get_table_names())
+    if not {"contacts", "addresses"}.issubset(tables):
+        return
+
+    legacy_columns = {"address", "city", "state", "postal_code", "country"}
+    contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+    if not legacy_columns.issubset(contact_columns):
+        return
+
+    with target_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO addresses
+                    (contact_id, type, street_address, city, state, postal_code, country)
+                SELECT
+                    contacts.id, 'Home', contacts.address, contacts.city,
+                    contacts.state, contacts.postal_code, contacts.country
+                FROM contacts
+                WHERE (
+                    contacts.address IS NOT NULL OR contacts.city IS NOT NULL OR
+                    contacts.state IS NOT NULL OR contacts.postal_code IS NOT NULL OR
+                    contacts.country IS NOT NULL
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM addresses WHERE addresses.contact_id = contacts.id
+                )
+                """
+            )
+        )
+        # Clearing the transferred values makes the compatibility migration
+        # idempotent and prevents a deliberately emptied address list from
+        # being resurrected on a later startup.
+        connection.execute(
+            text(
+                """
+                UPDATE contacts
+                SET address = NULL, city = NULL, state = NULL,
+                    postal_code = NULL, country = NULL
+                WHERE address IS NOT NULL OR city IS NOT NULL OR state IS NOT NULL OR
+                      postal_code IS NOT NULL OR country IS NOT NULL
+                """
+            )
+        )
+
+
 def init_db() -> None:
     """Create tables and upgrade supported older schemas; safe to call repeatedly."""
     from app import models  # noqa: F401  (register models on Base.metadata)
 
     Base.metadata.create_all(bind=engine)
     _upgrade_schema(engine)
+    _migrate_legacy_addresses(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Contact
+from app.models import Address, Contact
 from app.schemas import ContactCreate, ContactReplace, ContactUpdate
 
 SORTABLE_FIELDS = ("id", "first_name", "last_name", "email", "company", "created_at", "updated_at")
@@ -61,8 +63,9 @@ def list_contacts(
 
 def create_contact(db: Session, payload: ContactCreate) -> Contact:
     data = payload.model_dump()
+    addresses = data.pop("addresses")
     data["email"] = _normalize_email(data["email"])
-    contact = Contact(**data)
+    contact = Contact(**data, addresses=[Address(**address) for address in addresses])
     db.add(contact)
     db.commit()
     db.refresh(contact)
@@ -70,15 +73,24 @@ def create_contact(db: Session, payload: ContactCreate) -> Contact:
 
 
 def replace_contact(db: Session, contact: Contact, payload: ContactReplace) -> Contact:
-    for field, value in payload.model_dump().items():
+    data = payload.model_dump()
+    addresses = data.pop("addresses")
+    for field, value in data.items():
         setattr(contact, field, _normalize_email(value) if field == "email" else value)
+    contact.addresses = [Address(**address) for address in addresses]
+    contact.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(contact)
     return contact
 
 
 def update_contact(db: Session, contact: Contact, payload: ContactUpdate) -> Contact:
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "addresses" in data:
+        addresses = data.pop("addresses") or []
+        contact.addresses = [Address(**address) for address in addresses]
+        contact.updated_at = datetime.now(timezone.utc)
+    for field, value in data.items():
         setattr(contact, field, _normalize_email(value) if field == "email" else value)
     db.commit()
     db.refresh(contact)
