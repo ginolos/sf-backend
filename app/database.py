@@ -80,37 +80,76 @@ def _migrate_legacy_addresses(target_engine: Engine) -> None:
         return
 
     with target_engine.begin() as connection:
+        # The unique version row is both a durable migration marker and a
+        # cross-process lock. PostgreSQL waits on an uncommitted conflicting
+        # insert; SQLite serializes writers. Only the transaction receiving the
+        # RETURNING row is allowed to copy and clear legacy values.
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_schema_migrations (
+                    version VARCHAR(100) PRIMARY KEY
+                )
+                """
+            )
+        )
+        claimed = connection.execute(
+            text(
+                """
+                INSERT INTO app_schema_migrations (version)
+                VALUES (:version)
+                ON CONFLICT (version) DO NOTHING
+                RETURNING version
+                """
+            ),
+            {"version": "2026-typed-addresses"},
+        ).scalar_one_or_none()
+        if claimed is None:
+            return
+
         connection.execute(
             text(
                 """
                 INSERT INTO addresses
                     (contact_id, type, street_address, city, state, postal_code, country)
                 SELECT
-                    contacts.id, 'Home', contacts.address, contacts.city,
-                    contacts.state, contacts.postal_code, contacts.country
+                    contacts.id, 'Home', NULLIF(TRIM(contacts.address), ''),
+                    NULLIF(TRIM(contacts.city), ''), NULLIF(TRIM(contacts.state), ''),
+                    NULLIF(TRIM(contacts.postal_code), ''),
+                    NULLIF(TRIM(contacts.country), '')
                 FROM contacts
                 WHERE (
-                    contacts.address IS NOT NULL OR contacts.city IS NOT NULL OR
-                    contacts.state IS NOT NULL OR contacts.postal_code IS NOT NULL OR
-                    contacts.country IS NOT NULL
+                    NULLIF(TRIM(contacts.address), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.city), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.state), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.postal_code), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.country), '') IS NOT NULL
                 )
                 AND NOT EXISTS (
-                    SELECT 1 FROM addresses WHERE addresses.contact_id = contacts.id
+                    SELECT 1 FROM addresses
+                    WHERE addresses.contact_id = contacts.id
+                      AND COALESCE(TRIM(addresses.street_address), '') =
+                          COALESCE(TRIM(contacts.address), '')
+                      AND COALESCE(TRIM(addresses.city), '') =
+                          COALESCE(TRIM(contacts.city), '')
+                      AND COALESCE(TRIM(addresses.state), '') =
+                          COALESCE(TRIM(contacts.state), '')
+                      AND COALESCE(TRIM(addresses.postal_code), '') =
+                          COALESCE(TRIM(contacts.postal_code), '')
+                      AND COALESCE(TRIM(addresses.country), '') =
+                          COALESCE(TRIM(contacts.country), '')
                 )
                 """
             )
         )
-        # Clearing the transferred values makes the compatibility migration
-        # idempotent and prevents a deliberately emptied address list from
-        # being resurrected on a later startup.
+        # Every meaningful value is now either copied or already represented by
+        # an exact typed-address match. Whitespace-only values carry no data.
         connection.execute(
             text(
                 """
                 UPDATE contacts
                 SET address = NULL, city = NULL, state = NULL,
                     postal_code = NULL, country = NULL
-                WHERE address IS NOT NULL OR city IS NOT NULL OR state IS NOT NULL OR
-                      postal_code IS NOT NULL OR country IS NOT NULL
                 """
             )
         )
