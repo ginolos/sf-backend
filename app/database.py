@@ -67,12 +67,101 @@ def _upgrade_schema(target_engine: Engine) -> None:
         raise
 
 
+def _migrate_legacy_addresses(target_engine: Engine) -> None:
+    """Move the former single-address columns into the one-to-many table once."""
+    inspector = inspect(target_engine)
+    tables = set(inspector.get_table_names())
+    if not {"contacts", "addresses"}.issubset(tables):
+        return
+
+    legacy_columns = {"address", "city", "state", "postal_code", "country"}
+    contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+    if not legacy_columns.issubset(contact_columns):
+        return
+
+    with target_engine.begin() as connection:
+        # The unique version row is both a durable migration marker and a
+        # cross-process lock. PostgreSQL waits on an uncommitted conflicting
+        # insert; SQLite serializes writers. Only the transaction receiving the
+        # RETURNING row is allowed to copy and clear legacy values.
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_schema_migrations (
+                    version VARCHAR(100) PRIMARY KEY
+                )
+                """
+            )
+        )
+        claimed = connection.execute(
+            text(
+                """
+                INSERT INTO app_schema_migrations (version)
+                VALUES (:version)
+                ON CONFLICT (version) DO NOTHING
+                RETURNING version
+                """
+            ),
+            {"version": "2026-typed-addresses"},
+        ).scalar_one_or_none()
+        if claimed is None:
+            return
+
+        connection.execute(
+            text(
+                """
+                INSERT INTO addresses
+                    (contact_id, type, street_address, city, state, postal_code, country)
+                SELECT
+                    contacts.id, 'Home', NULLIF(TRIM(contacts.address), ''),
+                    NULLIF(TRIM(contacts.city), ''), NULLIF(TRIM(contacts.state), ''),
+                    NULLIF(TRIM(contacts.postal_code), ''),
+                    NULLIF(TRIM(contacts.country), '')
+                FROM contacts
+                WHERE (
+                    NULLIF(TRIM(contacts.address), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.city), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.state), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.postal_code), '') IS NOT NULL OR
+                    NULLIF(TRIM(contacts.country), '') IS NOT NULL
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM addresses
+                    WHERE addresses.contact_id = contacts.id
+                      AND COALESCE(TRIM(addresses.street_address), '') =
+                          COALESCE(TRIM(contacts.address), '')
+                      AND COALESCE(TRIM(addresses.city), '') =
+                          COALESCE(TRIM(contacts.city), '')
+                      AND COALESCE(TRIM(addresses.state), '') =
+                          COALESCE(TRIM(contacts.state), '')
+                      AND COALESCE(TRIM(addresses.postal_code), '') =
+                          COALESCE(TRIM(contacts.postal_code), '')
+                      AND COALESCE(TRIM(addresses.country), '') =
+                          COALESCE(TRIM(contacts.country), '')
+                )
+                """
+            )
+        )
+        # Every meaningful value is now either copied or already represented by
+        # an exact typed-address match. Whitespace-only values carry no data.
+        connection.execute(
+            text(
+                """
+                UPDATE contacts
+                SET address = NULL, city = NULL, state = NULL,
+                    postal_code = NULL, country = NULL
+                """
+            )
+        )
+
+
 def init_db() -> None:
     """Create tables and upgrade supported older schemas; safe to call repeatedly."""
     from app import models  # noqa: F401  (register models on Base.metadata)
 
     Base.metadata.create_all(bind=engine)
     _upgrade_schema(engine)
+    _migrate_legacy_addresses(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

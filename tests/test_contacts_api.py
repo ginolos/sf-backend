@@ -1,3 +1,9 @@
+from sqlalchemy import inspect
+
+from app.database import SessionLocal, engine
+from app.models import Address
+
+
 BASE = "/api/v1/contacts"
 TINY_PNG = "data:image/png;base64,iVBORw0KGgo="
 
@@ -26,6 +32,56 @@ def test_photo_is_stored_and_returned(client, payload):
     contact_id = response.json()["id"]
     assert response.json()["photo"] == TINY_PNG
     assert client.get(f"{BASE}/{contact_id}").json()["photo"] == TINY_PNG
+
+
+def test_contact_owns_multiple_typed_addresses(client, payload):
+    addresses = [
+        {
+            "type": "Home",
+            "street_address": "12 Home Lane",
+            "city": "London",
+            "state": None,
+            "postal_code": "SW1A 1AA",
+            "country": "UK",
+        },
+        {
+            "type": "Work",
+            "street_address": "1 Market St",
+            "city": "San Francisco",
+            "state": "CA",
+            "postal_code": "94105",
+            "country": "USA",
+        },
+    ]
+    body = client.post(BASE, json={**payload, "addresses": addresses}).json()
+
+    assert [address["type"] for address in body["addresses"]] == ["Home", "Work"]
+    assert all(address["id"] > 0 for address in body["addresses"])
+    assert [address["street_address"] for address in body["addresses"]] == [
+        "12 Home Lane",
+        "1 Market St",
+    ]
+
+
+def test_addresses_table_has_contact_foreign_key(client):
+    foreign_keys = inspect(engine).get_foreign_keys("addresses")
+    contact_key = next(key for key in foreign_keys if key["referred_table"] == "contacts")
+    assert contact_key["constrained_columns"] == ["contact_id"]
+    assert contact_key["referred_columns"] == ["id"]
+    assert contact_key["options"].get("ondelete") == "CASCADE"
+
+
+def test_address_requires_valid_type_and_location(client, payload):
+    invalid_type = client.post(
+        BASE,
+        json={**payload, "addresses": [{"type": "Vacation", "city": "Paris"}]},
+    )
+    blank = client.post(
+        BASE,
+        json={**payload, "email": "blank@example.com", "addresses": [{"type": "Other"}]},
+    )
+    assert invalid_type.status_code == 422
+    assert blank.status_code == 422
 
 
 def test_invalid_photo_data_is_rejected(client, payload):
@@ -117,13 +173,30 @@ def test_list_rejects_bad_sort_field(client):
 
 
 def test_patch_updates_only_sent_fields(client, payload):
-    contact_id = client.post(BASE, json=payload).json()["id"]
+    created = client.post(BASE, json=payload).json()
+    contact_id = created["id"]
     response = client.patch(f"{BASE}/{contact_id}", json={"phone": "+1-000-000-0000"})
     assert response.status_code == 200
     body = response.json()
     assert body["phone"] == "+1-000-000-0000"
     assert body["first_name"] == "Ada"
     assert body["company"] == "Analytical Engines"
+    assert body["addresses"] == created["addresses"]
+
+
+def test_patch_atomically_replaces_and_clears_addresses(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+    replacement = [{"type": "Other", "city": "Paris", "country": "France"}]
+
+    replaced = client.patch(f"{BASE}/{contact_id}", json={"addresses": replacement})
+    assert replaced.status_code == 200
+    assert len(replaced.json()["addresses"]) == 1
+    assert replaced.json()["addresses"][0]["type"] == "Other"
+    assert replaced.json()["addresses"][0]["city"] == "Paris"
+
+    cleared = client.patch(f"{BASE}/{contact_id}", json={"addresses": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["addresses"] == []
 
 
 def test_patch_duplicate_email_conflicts(client, payload):
@@ -159,6 +232,22 @@ def test_put_keeps_photo_when_it_is_carried_through(client, payload):
     )
     assert response.status_code == 200
     assert response.json()["photo"] == TINY_PNG
+    assert response.json()["addresses"][0]["type"] == "Work"
+
+
+def test_put_replaces_the_entire_address_collection(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+    response = client.put(
+        f"{BASE}/{contact_id}",
+        json={
+            **payload,
+            "addresses": [{"type": "Home", "street_address": "99 New Address"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["addresses"]) == 1
+    assert response.json()["addresses"][0]["street_address"] == "99 New Address"
 
 
 def test_put_missing_contact_returns_404(client):
@@ -170,10 +259,14 @@ def test_put_missing_contact_returns_404(client):
 
 
 def test_delete_contact(client, payload):
-    contact_id = client.post(BASE, json=payload).json()["id"]
+    created = client.post(BASE, json=payload).json()
+    contact_id = created["id"]
+    address_ids = [address["id"] for address in created["addresses"]]
     assert client.delete(f"{BASE}/{contact_id}").status_code == 204
     assert client.get(f"{BASE}/{contact_id}").status_code == 404
     assert client.delete(f"{BASE}/{contact_id}").status_code == 404
+    with SessionLocal() as db:
+        assert all(db.get(Address, address_id) is None for address_id in address_ids)
 
 
 def test_root_lists_entrypoints(client):
