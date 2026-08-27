@@ -66,6 +66,11 @@ SQLite database normally dies with the connection that opened it, so `app/databa
 uses SQLAlchemy's `StaticPool` to hold one connection open for the process's lifetime.
 Every request — including ones FastAPI runs on a worker thread — sees the same data.
 
+On startup, the application also performs its supported one-column compatibility
+upgrade: a pre-photo `contacts` table receives a nullable `photo` column. The
+upgrade is idempotent and works for the documented SQLite and PostgreSQL
+configurations; no separate migration command is required for this release.
+
 **Data is lost when the process exits.** Because of that, three sample contacts are
 seeded on startup so the API is never empty. To persist instead, point at a file:
 

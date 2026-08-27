@@ -11,6 +11,19 @@ MAX_PHOTO_DATA_LENGTH = 2_800_000
 PHOTO_PATTERN = re.compile(r"^data:image/(jpeg|png|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$")
 
 
+def _matches_image_signature(media_type: str, data: bytes) -> bool:
+    """Check the inexpensive, stable file signature for each accepted format."""
+    if media_type == "png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "jpeg":
+        return data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9")
+    if media_type == "webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    if media_type == "gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    return False
+
+
 def _validated_photo(value: str | None) -> str | None:
     if value is None or value == "":
         return None
@@ -23,6 +36,8 @@ def _validated_photo(value: str | None) -> str | None:
         raise ValueError("photo contains invalid base64 data") from error
     if len(decoded) > MAX_PHOTO_BYTES:
         raise ValueError("photo must be 2 MB or smaller")
+    if not _matches_image_signature(match.group(1), decoded):
+        raise ValueError("photo content does not match its declared image type")
     return value
 
 
