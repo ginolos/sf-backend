@@ -66,6 +66,11 @@ SQLite database normally dies with the connection that opened it, so `app/databa
 uses SQLAlchemy's `StaticPool` to hold one connection open for the process's lifetime.
 Every request — including ones FastAPI runs on a worker thread — sees the same data.
 
+On startup, the application also performs its supported one-column compatibility
+upgrade: a pre-photo `contacts` table receives a nullable `photo` column. The
+upgrade is idempotent and works for the documented SQLite and PostgreSQL
+configurations; no separate migration command is required for this release.
+
 **Data is lost when the process exits.** Because of that, three sample contacts are
 seeded on startup so the API is never empty. To persist instead, point at a file:
 
@@ -108,10 +113,16 @@ also read):
 
 ```
 first_name, last_name, email, phone, company, job_title,
-address, city, state, postal_code, country, notes
+photo, address, city, state, postal_code, country, notes
 ```
 
 Responses add `id`, `full_name`, `created_at`, and `updated_at` (UTC).
+
+`photo` is an optional image data URL stored directly on the contact. The API
+accepts JPEG, PNG, WebP, and GIF data up to 2 MB and rejects malformed base64 or
+other media types with `422`. Because `PUT` is a full replacement, clients must
+include the existing `photo` value when editing other fields or it will be
+cleared.
 
 ### List query parameters
 

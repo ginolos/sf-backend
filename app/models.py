@@ -22,6 +22,7 @@ class Contact(Base):
 
     company: Mapped[str | None] = mapped_column(String(200))
     job_title: Mapped[str | None] = mapped_column(String(200))
+    photo: Mapped[str | None] = mapped_column(Text)
 
     address: Mapped[str | None] = mapped_column(String(300))
     city: Mapped[str | None] = mapped_column(String(120))

@@ -1,7 +1,8 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -45,11 +46,33 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor.close()
 
 
+def _upgrade_schema(target_engine: Engine) -> None:
+    """Apply small, idempotent upgrades for databases created by older releases."""
+    inspector = inspect(target_engine)
+    if "contacts" not in inspector.get_table_names():
+        return
+    if "photo" in {column["name"] for column in inspector.get_columns("contacts")}:
+        return
+
+    try:
+        with target_engine.begin() as connection:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
+    except SQLAlchemyError:
+        # Multiple application workers can race during startup. Suppress only
+        # the harmless case where another worker completed this exact upgrade.
+        if "photo" in {
+            column["name"] for column in inspect(target_engine).get_columns("contacts")
+        }:
+            return
+        raise
+
+
 def init_db() -> None:
-    """Create tables. Called on startup; safe to call repeatedly."""
+    """Create tables and upgrade supported older schemas; safe to call repeatedly."""
     from app import models  # noqa: F401  (register models on Base.metadata)
 
     Base.metadata.create_all(bind=engine)
+    _upgrade_schema(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

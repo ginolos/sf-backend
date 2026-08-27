@@ -1,4 +1,5 @@
 BASE = "/api/v1/contacts"
+TINY_PNG = "data:image/png;base64,iVBORw0KGgo="
 
 
 def test_health(client):
@@ -17,6 +18,30 @@ def test_create_contact(client, payload):
     assert body["email"] == "ada@example.com"
     assert body["full_name"] == "Ada Lovelace"
     assert body["created_at"] and body["updated_at"]
+
+
+def test_photo_is_stored_and_returned(client, payload):
+    response = client.post(BASE, json={**payload, "photo": TINY_PNG})
+    assert response.status_code == 201
+    contact_id = response.json()["id"]
+    assert response.json()["photo"] == TINY_PNG
+    assert client.get(f"{BASE}/{contact_id}").json()["photo"] == TINY_PNG
+
+
+def test_invalid_photo_data_is_rejected(client, payload):
+    response = client.post(BASE, json={**payload, "photo": "data:text/plain;base64,aGVsbG8="})
+    assert response.status_code == 422
+
+
+def test_arbitrary_bytes_with_an_image_label_are_rejected(client, payload):
+    response = client.post(BASE, json={**payload, "photo": "data:image/png;base64,aGVsbG8="})
+    assert response.status_code == 422
+
+
+def test_bytes_must_match_the_declared_image_type(client, payload):
+    jpeg_bytes = "data:image/png;base64,/9j/2Q=="
+    response = client.post(BASE, json={**payload, "photo": jpeg_bytes})
+    assert response.status_code == 422
 
 
 def test_create_requires_valid_email(client, payload):
@@ -124,6 +149,16 @@ def test_put_replaces_contact(client, payload):
     body = response.json()
     assert body["full_name"] == "Grace Hopper"
     assert body["company"] is None  # omitted fields are cleared by PUT
+
+
+def test_put_keeps_photo_when_it_is_carried_through(client, payload):
+    contact_id = client.post(BASE, json={**payload, "photo": TINY_PNG}).json()["id"]
+    response = client.put(
+        f"{BASE}/{contact_id}",
+        json={**payload, "photo": TINY_PNG, "company": "Updated"},
+    )
+    assert response.status_code == 200
+    assert response.json()["photo"] == TINY_PNG
 
 
 def test_put_missing_contact_returns_404(client):
