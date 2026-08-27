@@ -108,10 +108,16 @@ also read):
 
 ```
 first_name, last_name, email, phone, company, job_title,
-address, city, state, postal_code, country, notes
+photo, address, city, state, postal_code, country, notes
 ```
 
 Responses add `id`, `full_name`, `created_at`, and `updated_at` (UTC).
+
+`photo` is an optional image data URL stored directly on the contact. The API
+accepts JPEG, PNG, WebP, and GIF data up to 2 MB and rejects malformed base64 or
+other media types with `422`. Because `PUT` is a full replacement, clients must
+include the existing `photo` value when editing other fields or it will be
+cleared.
 
 ### List query parameters
 
